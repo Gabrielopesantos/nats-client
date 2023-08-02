@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -20,10 +20,89 @@ var (
 	OK_RESPONSE         = []byte("+OK\r\n")
 )
 
+type Operation string
+
+const (
+	INFO    Operation = "INFO"
+	CONNECT           = "CONNECT"
+	PUB               = "PUB"
+	HPUB              = "HPUB"
+	SUB               = "SUB"
+	UNSUB             = "UNSUB"
+	PING              = "PING"
+	PONG              = "PONG"
+	OK                = "+OK"
+	ERR               = "-ERR"
+)
+
+type Message interface {
+	MessagePayload() []byte
+	OperationName() Operation
+}
+
+type ServerInfo struct {
+	ServerId   string `json:"server_id"`
+	ServerName string `json:"server_name"`
+	Version    string `json:"version"`
+	Protocol   int    `json:"proto"`
+	GitCommit  string `json:"git_commit"`
+	GoVersion  string `json:"go"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Headers    bool   `json:"headers"`
+	MaxPayload int    `json:"max_payload"`
+	ClientId   int    `json:"client_id"`
+	ClientIp   string `json:"client_ip"`
+	Cluster    string `json:"cluster"`
+}
+
+type InfoMessage struct {
+	opName Operation
+	ServerInfo
+}
+
+func (i *InfoMessage) MessagePayload() []byte {
+	return nil
+}
+
+func (i *InfoMessage) OperationName() Operation {
+	return i.opName
+}
+
+type OkMessage struct {
+	opName Operation
+}
+
+func (o *OkMessage) MessagePayload() []byte {
+	return nil
+}
+
+func (o *OkMessage) OperationName() Operation {
+	return o.opName
+}
+
+func ParseMessage(operationName []byte, messageBytes []byte) (Message, error) {
+	switch Operation(operationName) {
+	case INFO:
+		msg := &InfoMessage{opName: INFO}
+		err := json.Unmarshal(messageBytes, &msg)
+		if err != nil {
+			return nil, err
+		}
+
+		return msg, nil
+	case OK:
+		return &OkMessage{opName: OK}, nil
+	}
+
+	return nil, nil
+}
+
 type Client struct {
+	ServerInfo ServerInfo
+
 	conn               net.Conn
-	serverInfo         []byte
-	messagesReceived   chan []byte
+	messagesChan       chan Message
 	readMessageTimeout time.Duration
 
 	connectionEstablised bool
@@ -55,10 +134,10 @@ func (c *Client) initializeConnection() error {
 	<-startReadSync
 	close(startReadSync)
 
-	readMsg := func(readTimeout time.Duration) ([]byte, error) {
-		fmt.Printf("Messages channel size: %d\n", c.messagesReceived)
+	readMsg := func(readTimeout time.Duration) (Message, error) {
+		fmt.Printf("Messages channel size: %d\n", len(c.messagesChan))
 		select {
-		case msg := <-c.messagesReceived:
+		case msg := <-c.messagesChan:
 			log.Println("reading message")
 			return msg, nil
 		case <-time.After(readTimeout):
@@ -66,13 +145,13 @@ func (c *Client) initializeConnection() error {
 		}
 	}
 
-	serverInfo, err := readMsg(c.readMessageTimeout)
+	_, err := readMsg(c.readMessageTimeout)
 	if err != nil {
 		return fmt.Errorf("error reading server information: %w", err)
 	}
 
-	// Have something to clean up messages
-	c.serverInfo = serverInfo[:len(serverInfo)-2]
+	// Set server info
+	// c.ServerInfo
 
 	CONNECT := []byte("CONNECT {}\r\n")
 	_, err = c.conn.Write(CONNECT)
@@ -80,13 +159,13 @@ func (c *Client) initializeConnection() error {
 		return fmt.Errorf("error sending CONNECT message to the server: %w", err)
 	}
 
-	okResponse, err := readMsg(c.readMessageTimeout)
+	okMessage, err := readMsg(c.readMessageTimeout)
 	if err != nil {
 		return fmt.Errorf("error reading OK response from the server: %w", err)
 	}
 
-	if !bytes.Equal(okResponse, OK_RESPONSE) {
-		return fmt.Errorf("expected OK response from the server, got: %s", okResponse)
+	if okMessage.OperationName() != OK {
+		return fmt.Errorf("expected OK response from the server, got: %s", okMessage.OperationName())
 	}
 
 	return nil
@@ -95,20 +174,36 @@ func (c *Client) initializeConnection() error {
 // NOTE: How do we use the context to cancel the ingestMessages loop?
 func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}) ([]byte, error) {
 	// Initialize the messagesReceived channel
-	c.messagesReceived = make(chan []byte, 256)
+	c.messagesChan = make(chan Message, 256)
 
 	connReader := bufio.NewReader(c.conn)
 	syncChannel <- struct{}{}
 	for {
-		response_msg_buf, err := connReader.ReadBytes(0x0a)
+		// Start by reading until the first space, which includes the operation name
+		operationName, err := connReader.ReadBytes(' ')
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("could not reader message operation name, error reading from the server: %s", err)
+			}
+		}
+
+		fmt.Printf("Operation name read: '%s'\n", operationName)
+
+		// Read the rest of the message
+		messageBuffer, err := connReader.ReadBytes(0x0a)
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("error reading from the server: %s", err)
 			}
 		}
 
-		log.Printf("received message: %s", response_msg_buf)
-		c.messagesReceived <- response_msg_buf
+		message, err := ParseMessage(operationName[:len(operationName)-1], messageBuffer)
+		if err != nil {
+			log.Printf("could not parse message: %s", err)
+		}
+
+		log.Printf("%+v", message)
+		c.messagesChan <- message
 		log.Println("message inserted")
 	}
 }
