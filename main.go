@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -81,11 +82,28 @@ func (o *OkMessage) OperationName() Operation {
 	return o.opName
 }
 
-func ParseMessage(operationName []byte, messageBytes []byte) (Message, error) {
+// FIXME: Find a better way to extract operation name and message payload from messages bytes
+// and include additions checks
+func ParseMessage(messageBytes []byte) (Message, error) {
+	var operationName []byte
+	var messagePayload []byte
+
+	for i, b := range messageBytes {
+		if b == ' ' {
+			operationName = messageBytes[:i]
+			messagePayload = messageBytes[i:]
+			break
+		}
+	}
+
+	if len(operationName) == 0 {
+		operationName = messageBytes[:len(messageBytes)-2]
+	}
+
 	switch Operation(operationName) {
 	case INFO:
 		msg := &InfoMessage{opName: INFO}
-		err := json.Unmarshal(messageBytes, &msg)
+		err := json.Unmarshal(messagePayload, &msg)
 		if err != nil {
 			return nil, err
 		}
@@ -135,10 +153,9 @@ func (c *Client) initializeConnection() error {
 	close(startReadSync)
 
 	readMsg := func(readTimeout time.Duration) (Message, error) {
-		fmt.Printf("Messages channel size: %d\n", len(c.messagesChan))
+		// fmt.Printf("Messages channel size: %d\n", len(c.messagesChan))
 		select {
 		case msg := <-c.messagesChan:
-			log.Println("reading message")
 			return msg, nil
 		case <-time.After(readTimeout):
 			return nil, fmt.Errorf("read timeout exceeded (%s)", readTimeout)
@@ -179,33 +196,39 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 	connReader := bufio.NewReader(c.conn)
 	syncChannel <- struct{}{}
 	for {
-		// Start by reading until the first space, which includes the operation name
-		operationName, err := connReader.ReadBytes(' ')
+		messageBytes, err := readMessagePayload(connReader, MSG_TERMINATE_BYTES)
 		if err != nil {
-			if err != io.EOF {
-				log.Printf("could not reader message operation name, error reading from the server: %s", err)
-			}
-		}
-
-		fmt.Printf("Operation name read: '%s'\n", operationName)
-
-		// Read the rest of the message
-		messageBuffer, err := connReader.ReadBytes(0x0a)
-		if err != nil {
+			// FIXME: Understand if this check makes sense
 			if err != io.EOF {
 				log.Printf("error reading from the server: %s", err)
 			}
 		}
 
-		message, err := ParseMessage(operationName[:len(operationName)-1], messageBuffer)
+		message, err := ParseMessage(messageBytes)
 		if err != nil {
 			log.Printf("could not parse message: %s", err)
 		}
 
-		log.Printf("%+v", message)
+		log.Printf("message: %+v\n", message)
 		c.messagesChan <- message
-		log.Println("message inserted")
 	}
+}
+
+// FIXME: Reads data byte-by-byte and checks for the delimiter after each byte read,
+// which could be inefficient if processing large amounts of data or if the delimiter is long.
+func readMessagePayload(r *bufio.Reader, delim []byte) ([]byte, error) {
+	var line []byte
+	for {
+		c, err := r.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		line = append(line, c)
+		if bytes.HasSuffix(line, delim) {
+			break
+		}
+	}
+	return line, nil
 }
 
 func main() {
