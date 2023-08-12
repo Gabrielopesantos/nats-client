@@ -1,4 +1,4 @@
-package main
+package nats
 
 import (
 	"bufio"
@@ -13,9 +13,7 @@ import (
 	"context"
 )
 
-// FIXME: To be removed
 var (
-	NATS_SERVER_URL = "localhost:4222"
 	// messages are terminate by \r\n
 	MSG_TERMINATE_BYTES = []byte{'\r', '\n'}
 	OK_RESPONSE         = []byte("+OK\r\n")
@@ -229,13 +227,4 @@ func readMessagePayload(r *bufio.Reader, delim []byte) ([]byte, error) {
 		}
 	}
 	return line, nil
-}
-
-func main() {
-	// Establishing a connection
-	natsClient := &Client{}
-	err := natsClient.Connect(NATS_SERVER_URL)
-	if err != nil {
-		log.Fatalln(err)
-	}
 }
