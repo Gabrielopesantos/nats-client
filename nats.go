@@ -14,9 +14,8 @@ import (
 )
 
 var (
-	// messages are terminate by \r\n
+	// messages are terminated with \r\n
 	MSG_TERMINATE_BYTES = []byte{'\r', '\n'}
-	OK_RESPONSE         = []byte("+OK\r\n")
 )
 
 type Operation string
@@ -80,9 +79,36 @@ func (o *OkMessage) OperationName() Operation {
 	return o.opName
 }
 
+type PingMessage struct {
+	opName Operation
+}
+
+func (p *PingMessage) MessagePayload() []byte {
+	return nil
+}
+
+func (p *PingMessage) OperationName() Operation {
+	return p.opName
+}
+
+type SubMessage struct {
+	opName     Operation
+	subject    string
+	queueGroup string
+	sid        int
+}
+
+func (s *SubMessage) MessagePayload() []byte {
+	return nil
+}
+
+func (s *SubMessage) OperationName() Operation {
+	return s.opName
+}
+
 // FIXME: Find a better way to extract operation name and message payload from messages bytes
 // and include additions checks
-func ParseMessage(messageBytes []byte) (Message, error) {
+func parseMessage(messageBytes []byte) (Message, error) {
 	var operationName []byte
 	var messagePayload []byte
 
@@ -109,6 +135,8 @@ func ParseMessage(messageBytes []byte) (Message, error) {
 		return msg, nil
 	case OK:
 		return &OkMessage{opName: OK}, nil
+	case PING:
+		return &PingMessage{opName: PING}, nil
 	}
 
 	return nil, nil
@@ -121,11 +149,11 @@ type Client struct {
 	messagesChan       chan Message
 	readMessageTimeout time.Duration
 
-	connectionEstablised bool
+	connectionEstablished bool
 }
 
 func (c *Client) Connect(url string) error {
-	// FIXME
+	// FIXME: Make ths configurable
 	c.readMessageTimeout = 5 * time.Second
 
 	conn, err := net.Dial("tcp", url)
@@ -143,7 +171,7 @@ func (c *Client) Connect(url string) error {
 }
 
 func (c *Client) initializeConnection() error {
-	// NOTE: Is this really needed?
+	// FIXME: Is this really needed?
 	startReadSync := make(chan struct{})
 	go c.ingestMessages(context.TODO(), startReadSync)
 
@@ -160,13 +188,17 @@ func (c *Client) initializeConnection() error {
 		}
 	}
 
-	_, err := readMsg(c.readMessageTimeout)
+	msg, err := readMsg(c.readMessageTimeout)
 	if err != nil {
 		return fmt.Errorf("error reading server information: %w", err)
 	}
 
-	// Set server info
-	// c.ServerInfo
+	infoMsg, ok := msg.(*InfoMessage)
+	if !ok {
+		return fmt.Errorf("expected INFO message from the server, got: %s", msg.OperationName())
+	}
+
+	c.ServerInfo = infoMsg.ServerInfo
 
 	CONNECT := []byte("CONNECT {}\r\n")
 	_, err = c.conn.Write(CONNECT)
@@ -202,14 +234,35 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 			}
 		}
 
-		message, err := ParseMessage(messageBytes)
+		message, err := parseMessage(messageBytes)
 		if err != nil {
 			log.Printf("could not parse message: %s", err)
 		}
 
-		log.Printf("message: %+v\n", message)
+		if _, ok := message.(*PingMessage); ok {
+			// NOTE: For now, if the received message is a Ping, let's reply right
+			// away and not include it in the messages channel
+			if err := c.pong(); err != nil {
+				log.Printf("could not write PONG message to the server: %s", err)
+			}
+
+			continue
+		}
+
+		log.Printf("Message: %v\n", message)
 		c.messagesChan <- message
 	}
+}
+
+func (c *Client) pong() error {
+	log.Printf("Ping, Pong!\n")
+	PONG := []byte("PONG\r\n")
+	_, err := c.conn.Write(PONG)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // FIXME: Reads data byte-by-byte and checks for the delimiter after each byte read,
