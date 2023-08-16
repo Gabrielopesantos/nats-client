@@ -18,97 +18,9 @@ var (
 	MSG_TERMINATE_BYTES = []byte{'\r', '\n'}
 )
 
-type Operation string
-
-const (
-	INFO    Operation = "INFO"
-	CONNECT           = "CONNECT"
-	PUB               = "PUB"
-	HPUB              = "HPUB"
-	SUB               = "SUB"
-	UNSUB             = "UNSUB"
-	PING              = "PING"
-	PONG              = "PONG"
-	OK                = "+OK"
-	ERR               = "-ERR"
-)
-
-type Message interface {
-	MessagePayload() []byte
-	OperationName() Operation
-}
-
-type ServerInfo struct {
-	ServerId   string `json:"server_id"`
-	ServerName string `json:"server_name"`
-	Version    string `json:"version"`
-	Protocol   int    `json:"proto"`
-	GitCommit  string `json:"git_commit"`
-	GoVersion  string `json:"go"`
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Headers    bool   `json:"headers"`
-	MaxPayload int    `json:"max_payload"`
-	ClientId   int    `json:"client_id"`
-	ClientIp   string `json:"client_ip"`
-	Cluster    string `json:"cluster"`
-}
-
-type InfoMessage struct {
-	opName Operation
-	ServerInfo
-}
-
-func (i *InfoMessage) MessagePayload() []byte {
-	return nil
-}
-
-func (i *InfoMessage) OperationName() Operation {
-	return i.opName
-}
-
-type OkMessage struct {
-	opName Operation
-}
-
-func (o *OkMessage) MessagePayload() []byte {
-	return nil
-}
-
-func (o *OkMessage) OperationName() Operation {
-	return o.opName
-}
-
-type PingMessage struct {
-	opName Operation
-}
-
-func (p *PingMessage) MessagePayload() []byte {
-	return nil
-}
-
-func (p *PingMessage) OperationName() Operation {
-	return p.opName
-}
-
-type SubMessage struct {
-	opName     Operation
-	subject    string
-	queueGroup string
-	sid        int
-}
-
-func (s *SubMessage) MessagePayload() []byte {
-	return nil
-}
-
-func (s *SubMessage) OperationName() Operation {
-	return s.opName
-}
-
 // FIXME: Find a better way to extract operation name and message payload from messages bytes
 // and include additions checks
-func parseMessage(messageBytes []byte) (Message, error) {
+func parseMessage(messageBytes []byte) (MessageReceive, error) {
 	var operationName []byte
 	var messagePayload []byte
 
@@ -178,17 +90,7 @@ func (c *Client) initializeConnection() error {
 	<-startReadSync
 	close(startReadSync)
 
-	readMsg := func(readTimeout time.Duration) (Message, error) {
-		// fmt.Printf("Messages channel size: %d\n", len(c.messagesChan))
-		select {
-		case msg := <-c.messagesChan:
-			return msg, nil
-		case <-time.After(readTimeout):
-			return nil, fmt.Errorf("read timeout exceeded (%s)", readTimeout)
-		}
-	}
-
-	msg, err := readMsg(c.readMessageTimeout)
+	msg, err := c.readMessage()
 	if err != nil {
 		return fmt.Errorf("error reading server information: %w", err)
 	}
@@ -200,13 +102,13 @@ func (c *Client) initializeConnection() error {
 
 	c.ServerInfo = infoMsg.ServerInfo
 
-	CONNECT := []byte("CONNECT {}\r\n")
+	CONNECT := []byte("CONNECT {}\r\n") // FIXME
 	_, err = c.conn.Write(CONNECT)
 	if err != nil {
 		return fmt.Errorf("error sending CONNECT message to the server: %w", err)
 	}
 
-	okMessage, err := readMsg(c.readMessageTimeout)
+	okMessage, err := c.readMessage()
 	if err != nil {
 		return fmt.Errorf("error reading OK response from the server: %w", err)
 	}
@@ -234,6 +136,7 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 			}
 		}
 
+		log.Printf("Message bytes: %s", messageBytes)
 		message, err := parseMessage(messageBytes)
 		if err != nil {
 			log.Printf("could not parse message: %s", err)
@@ -249,17 +152,68 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 			continue
 		}
 
-		log.Printf("Message: %v\n", message)
+		// log.Printf("Message: %v\n", message)
 		c.messagesChan <- message
 	}
 }
 
+func (c *Client) readMessage() (Message, error) {
+	readMessageTimeout := 5 * time.Second // FIXME: Make configurable
+	select {
+	case msg := <-c.messagesChan:
+		return msg, nil
+	case <-time.After(readMessageTimeout):
+		return nil, fmt.Errorf("read timeout exceeded (%s)", readMessageTimeout)
+	}
+}
+
 func (c *Client) pong() error {
-	log.Printf("Ping, Pong!\n")
-	PONG := []byte("PONG\r\n")
+	PONG := []byte("PONG\r\n") // FIXME
 	_, err := c.conn.Write(PONG)
 	if err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func (c *Client) Publish(subject string, payload []byte) error {
+	pubMsg := PublishMessage{
+		opName:  PUB,
+		subject: subject,
+		nBytes:  len(payload),
+		payload: payload,
+	}
+
+	_, err := c.conn.Write(pubMsg.FormattedMessage())
+	if err != nil {
+		return fmt.Errorf("could not write PUB message to the server: %w", err)
+	}
+
+	return nil
+}
+
+// FIXME
+func (c *Client) Subscribe(subject string) error {
+	subMsg := SubscribeMessage{
+		opName:  SUB,
+		subject: subject,
+		sid:     1, // FIXME: Hardcoded for now
+	}
+
+	_, err := c.conn.Write(subMsg.OperationMessage())
+	if err != nil {
+		return fmt.Errorf("could not write SUB message to the server: %w", err)
+	}
+
+	// NOTE: What is the message at the top of the channel isn't the one we expect?
+	msg, err := c.readMessage()
+	if err != nil {
+		return fmt.Errorf("could not read the acknowledgement message (OK) from the server: %w", err)
+	}
+
+	if _, ok := msg.(*OkMessage); !ok {
+		return fmt.Errorf("expected an acknowledgement message (OK) from the server, got: %s", msg.OperationName())
 	}
 
 	return nil
