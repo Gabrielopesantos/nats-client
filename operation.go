@@ -13,24 +13,25 @@ const (
 	HPUB              = "HPUB"
 	SUB               = "SUB"
 	UNSUB             = "UNSUB"
+	MSG               = "MSG"
 	PING              = "PING"
 	PONG              = "PONG"
 	OK                = "+OK"
 	ERR               = "-ERR"
 )
 
-type Message interface {
+type OperationMessage interface {
 	OperationName() Operation
 }
 
-type MessageReceive interface {
+type OperationMessageReceive interface {
 	MessagePayload() []byte
-	Message
+	OperationMessage
 }
 
-type MessageSend interface {
+type OperationMessageSend interface {
 	FormattedMessage() []byte
-	Message
+	OperationMessage
 }
 
 type ServerInfo struct {
@@ -145,4 +146,29 @@ func (s *SubscribeMessage) MessagePayload() []byte {
 
 func (s *SubscribeMessage) OperationMessage() []byte {
 	return []byte(fmt.Sprintf("%s %s %s %d\r\n", s.opName, s.subject, s.queueGroup, s.sid))
+}
+
+type Subscription struct {
+	subject    string
+	queueGroup string
+	sid        int // NOTE: Is the sid needed here?
+}
+
+// FIXME: Overlaps with PublishMessage ???
+type ContentMessage struct {
+	opName  Operation
+	Subject string
+	sid     int
+	Reply   string
+	Data    []byte
+	nBytes  int
+	Sub     *Subscription
+}
+
+func (c *ContentMessage) OperationName() Operation {
+	return c.opName
+}
+
+func (c *ContentMessage) MessagePayload() []byte {
+	return c.Data
 }

@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
+	"strconv"
+	"strings"
 	"time"
 
 	"context"
@@ -23,9 +26,10 @@ type Client struct {
 
 	conn net.Conn
 
-	messages      chan Message
-	subscriptions map[int]chan Message
-	acks          chan struct{}
+	messages             chan OperationMessage
+	subscriptionMessages map[int]chan *ContentMessage
+	subscriptions        map[int]Subscription // *?
+	acks                 chan struct{}
 
 	connectionEstablished bool
 
@@ -44,7 +48,8 @@ func (c *Client) Connect(url string) error {
 	}
 	c.conn = conn
 
-	c.subscriptions = make(map[int]chan Message)
+	c.subscriptionMessages = make(map[int]chan *ContentMessage)
+	c.subscriptions = make(map[int]Subscription)
 	c.acks = make(chan struct{}) // FIXME: Not buffered?
 
 	// FIXME: Is this really needed?
@@ -91,7 +96,7 @@ func (c *Client) initializeConnection() error {
 // NOTE: How do we use the context to cancel the ingestMessages loop?
 func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}) ([]byte, error) {
 	// Initialize the messagesReceived channel
-	c.messages = make(chan Message, 256) // FIXME
+	c.messages = make(chan OperationMessage, 256) // FIXME
 
 	connReader := bufio.NewReader(c.conn)
 	syncChannel <- struct{}{}
@@ -104,12 +109,12 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 			}
 		}
 
-		log.Printf("Message bytes: %s", messageBytes)
+		// log.Printf("Message bytes: %s", messageBytes)
 		message, err := parseMessage(messageBytes)
 		if err != nil {
 			log.Printf("could not parse message: %s", err)
 		}
-		// log.Printf("Message: %v\n", message)
+		log.Printf("Message: %v\n", message)
 
 		switch message.(type) {
 		case *OkMessage:
@@ -120,6 +125,12 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 			if err := c.pong(); err != nil {
 				log.Printf("could not write PONG message to the server: %s", err)
 			}
+		case *ContentMessage:
+			contentMsg := message.(*ContentMessage)
+			sub := c.subscriptions[contentMsg.sid]
+			contentMsg.Sub = &sub
+
+			c.subscriptionMessages[contentMsg.sid] <- contentMsg
 		default:
 			c.messages <- message
 		}
@@ -139,7 +150,7 @@ func (c *Client) ackReceived() bool {
 	}
 }
 
-func (c *Client) readMessage() (Message, error) {
+func (c *Client) readMessage() (OperationMessage, error) {
 	select {
 	case msg := <-c.messages:
 		return msg, nil
@@ -180,11 +191,12 @@ func (c *Client) Publish(subject string, payload []byte) error {
 }
 
 // FIXME
-func (c *Client) Subscribe(subject string) error {
+func (c *Client) ChanSubscribe(subject string, ch chan *ContentMessage) error {
+	sid := rand.Intn(100000) // NOTE: For testing purposes
 	subMsg := SubscribeMessage{
 		opName:  SUB,
 		subject: subject,
-		sid:     1, // FIXME: Hardcoded for now
+		sid:     sid,
 	}
 
 	_, err := c.conn.Write(subMsg.OperationMessage())
@@ -195,6 +207,15 @@ func (c *Client) Subscribe(subject string) error {
 	if !c.ackReceived() {
 		return fmt.Errorf("did not receive ACK from the server")
 	}
+
+	sub := Subscription{
+		subject: subject,
+		sid:     sid,
+	}
+
+	c.subscriptions[sub.sid] = sub
+	// FIXME: Make channel buffer size configurable
+	c.subscriptionMessages[sub.sid] = ch
 
 	return nil
 }
@@ -213,19 +234,35 @@ func readMessagePayload(r *bufio.Reader, delim []byte) ([]byte, error) {
 			break
 		}
 	}
+
+	// FIXME: Has messages (MSG) payload is separated from the opeartion data with \r\n
+	// this allows reading the message data to the same slice
+	if bytes.HasPrefix(line, []byte("MSG")) {
+		for {
+			c, err := r.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			line = append(line, c)
+			if bytes.HasSuffix(line, delim) {
+				break
+			}
+		}
+	}
+
 	return line, nil
 }
 
 // FIXME: Find a better way to extract operation name and message payload from messages bytes
 // and include additions checks
-func parseMessage(messageBytes []byte) (MessageReceive, error) {
+func parseMessage(messageBytes []byte) (OperationMessageReceive, error) {
 	var operationName []byte
-	var messagePayload []byte
+	var messageData []byte
 
 	for i, b := range messageBytes {
 		if b == ' ' {
 			operationName = messageBytes[:i]
-			messagePayload = messageBytes[i:]
+			messageData = messageBytes[i:]
 			break
 		}
 	}
@@ -237,7 +274,7 @@ func parseMessage(messageBytes []byte) (MessageReceive, error) {
 	switch Operation(operationName) {
 	case INFO:
 		msg := &InfoMessage{opName: INFO}
-		err := json.Unmarshal(messagePayload, &msg)
+		err := json.Unmarshal(messageData, &msg)
 		if err != nil {
 			return nil, err
 		}
@@ -247,6 +284,25 @@ func parseMessage(messageBytes []byte) (MessageReceive, error) {
 		return &OkMessage{opName: OK}, nil
 	case PING:
 		return &PingMessage{opName: PING}, nil
+	case MSG:
+		// FIXME
+		messageDataStr := strings.Trim(string(messageData), "\r\n ")
+		messageParts := strings.Split(messageDataStr, "\r\n")
+		messageInfo := strings.Split(messageParts[0], " ")
+
+		subject := messageInfo[0]
+		sid, _ := strconv.Atoi(messageInfo[1])
+		nBytes, _ := strconv.Atoi(messageInfo[2])
+		data := []byte(messageParts[1])
+
+		// FIXME: Assuming `reply-to` will not be in the message for now
+		return &ContentMessage{
+			opName:  MSG,
+			Subject: subject,
+			sid:     sid,
+			nBytes:  nBytes,
+			Data:    data,
+		}, nil
 	}
 
 	return nil, nil
