@@ -16,6 +16,8 @@ import (
 	"context"
 )
 
+type CallbackFunction func(msg *ContentMessage)
+
 var (
 	// messages are terminated with \r\n
 	MSG_TERMINATE_BYTES = []byte{'\r', '\n'}
@@ -26,10 +28,12 @@ type Client struct {
 
 	conn net.Conn
 
-	messages             chan OperationMessage
-	subscriptionMessages map[int]chan *ContentMessage
-	subscriptions        map[int]Subscription // *?
-	acks                 chan struct{}
+	messages chan OperationMessage
+	acks     chan struct{}
+
+	subscriptions                 map[int]*Subscription // *?
+	subscriptionMessages          map[int]chan *ContentMessage
+	subscriptionCallbackFunctions map[int]CallbackFunction
 
 	connectionEstablished bool
 
@@ -38,7 +42,7 @@ type Client struct {
 }
 
 func (c *Client) Connect(url string) error {
-	// FIXME: Make ths configurable
+	// FIXME: Make these fields configurable
 	c.readMessageTimeout = 5 * time.Second
 	c.ackValidateTimeout = 5 * time.Second
 
@@ -48,9 +52,13 @@ func (c *Client) Connect(url string) error {
 	}
 	c.conn = conn
 
+	// Initialize the messagesReceived channel
+	c.messages = make(chan OperationMessage, 256) // NOTE: Buffer size?
+	c.acks = make(chan struct{})                  // FIXME: Not buffered?
+
+	c.subscriptions = make(map[int]*Subscription)
 	c.subscriptionMessages = make(map[int]chan *ContentMessage)
-	c.subscriptions = make(map[int]Subscription)
-	c.acks = make(chan struct{}) // FIXME: Not buffered?
+	c.subscriptionCallbackFunctions = make(map[int]CallbackFunction)
 
 	// FIXME: Is this really needed?
 	startReadSync := make(chan struct{})
@@ -95,8 +103,6 @@ func (c *Client) initializeConnection() error {
 
 // NOTE: How do we use the context to cancel the ingestMessages loop?
 func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}) ([]byte, error) {
-	// Initialize the messagesReceived channel
-	c.messages = make(chan OperationMessage, 256) // FIXME
 
 	connReader := bufio.NewReader(c.conn)
 	syncChannel <- struct{}{}
@@ -128,7 +134,7 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 		case *ContentMessage:
 			contentMsg := message.(*ContentMessage)
 			sub := c.subscriptions[contentMsg.sid]
-			contentMsg.Sub = &sub
+			contentMsg.Sub = sub
 
 			c.subscriptionMessages[contentMsg.sid] <- contentMsg
 		default:
@@ -190,8 +196,44 @@ func (c *Client) Publish(subject string, payload []byte) error {
 	return nil
 }
 
-// FIXME
 func (c *Client) ChanSubscribe(subject string, ch chan *ContentMessage) error {
+	sub, err := c.subscribe(subject)
+	if err != nil {
+		return err
+	}
+
+	c.subscriptions[sub.sid] = sub
+	c.subscriptionMessages[sub.sid] = ch
+
+	return nil
+}
+
+func (c *Client) Subscribe(subject string, callbackFunc func(msg *ContentMessage)) error {
+	sub, err := c.subscribe(subject)
+	if err != nil {
+		return err
+	}
+
+	c.subscriptions[sub.sid] = sub
+	// FIXME: Make channel buffer size configurable
+	c.subscriptionMessages[sub.sid] = make(chan *ContentMessage, 32)
+	c.subscriptionCallbackFunctions[sub.sid] = callbackFunc
+
+	// FIXME
+	go func(sid int) {
+		for {
+			if msg, ok := <-c.subscriptionMessages[sid]; ok {
+				c.subscriptionCallbackFunctions[sid](msg)
+			} else {
+				break
+			}
+		}
+	}(sub.sid)
+
+	return nil
+}
+
+func (c *Client) subscribe(subject string) (*Subscription, error) {
 	sid := rand.Intn(100000) // NOTE: For testing purposes
 	subMsg := SubscribeMessage{
 		opName:  SUB,
@@ -201,11 +243,11 @@ func (c *Client) ChanSubscribe(subject string, ch chan *ContentMessage) error {
 
 	_, err := c.conn.Write(subMsg.OperationMessage())
 	if err != nil {
-		return fmt.Errorf("could not write SUB message to the server: %w", err)
+		return nil, fmt.Errorf("could not write SUB message to the server: %w", err)
 	}
 
 	if !c.ackReceived() {
-		return fmt.Errorf("did not receive ACK from the server")
+		return nil, fmt.Errorf("did not receive ACK from the server")
 	}
 
 	sub := Subscription{
@@ -213,11 +255,7 @@ func (c *Client) ChanSubscribe(subject string, ch chan *ContentMessage) error {
 		sid:     sid,
 	}
 
-	c.subscriptions[sub.sid] = sub
-	// FIXME: Make channel buffer size configurable
-	c.subscriptionMessages[sub.sid] = ch
-
-	return nil
+	return &sub, nil
 }
 
 // FIXME: Reads data byte-by-byte and checks for the delimiter after each byte read,
