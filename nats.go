@@ -196,16 +196,16 @@ func (c *Client) Publish(subject string, payload []byte) error {
 	return nil
 }
 
-func (c *Client) ChanSubscribe(subject string, ch chan *ContentMessage) error {
+func (c *Client) ChanSubscribe(subject string, ch chan *ContentMessage) (*Subscription, error) {
 	sub, err := c.subscribe(subject)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	c.subscriptions[sub.sid] = sub
-	c.subscriptionMessages[sub.sid] = ch
+	c.subscriptions[sub.Sid] = sub
+	c.subscriptionMessages[sub.Sid] = ch
 
-	return nil
+	return sub, nil
 }
 
 func (c *Client) Subscribe(subject string, callbackFunc func(msg *ContentMessage)) error {
@@ -214,10 +214,10 @@ func (c *Client) Subscribe(subject string, callbackFunc func(msg *ContentMessage
 		return err
 	}
 
-	c.subscriptions[sub.sid] = sub
+	c.subscriptions[sub.Sid] = sub
 	// FIXME: Make channel buffer size configurable
-	c.subscriptionMessages[sub.sid] = make(chan *ContentMessage, 32)
-	c.subscriptionCallbackFunctions[sub.sid] = callbackFunc
+	c.subscriptionMessages[sub.Sid] = make(chan *ContentMessage, 32)
+	c.subscriptionCallbackFunctions[sub.Sid] = callbackFunc
 
 	// FIXME
 	go func(sid int) {
@@ -228,7 +228,7 @@ func (c *Client) Subscribe(subject string, callbackFunc func(msg *ContentMessage
 				break
 			}
 		}
-	}(sub.sid)
+	}(sub.Sid)
 
 	return nil
 }
@@ -236,9 +236,11 @@ func (c *Client) Subscribe(subject string, callbackFunc func(msg *ContentMessage
 func (c *Client) subscribe(subject string) (*Subscription, error) {
 	sid := rand.Intn(100000) // NOTE: For testing purposes
 	subMsg := SubscribeMessage{
-		opName:  SUB,
-		subject: subject,
-		sid:     sid,
+		opName: SUB,
+		Subscription: Subscription{
+			Subject: subject,
+			Sid:     sid,
+		},
 	}
 
 	_, err := c.conn.Write(subMsg.OperationMessage())
@@ -250,12 +252,16 @@ func (c *Client) subscribe(subject string) (*Subscription, error) {
 		return nil, fmt.Errorf("did not receive ACK from the server")
 	}
 
-	sub := Subscription{
-		subject: subject,
-		sid:     sid,
-	}
+	return &subMsg.Subscription, nil
+}
 
-	return &sub, nil
+func (c *Client) Unsubscribe(sub *Subscription) {
+	close(c.subscriptionMessages[sub.Sid])
+
+	// FIXME: These operations should be mutually exclusive
+	delete(c.subscriptions, sub.Sid)
+	delete(c.subscriptionMessages, sub.Sid)
+	delete(c.subscriptionCallbackFunctions, sub.Sid)
 }
 
 // FIXME: Reads data byte-by-byte and checks for the delimiter after each byte read,

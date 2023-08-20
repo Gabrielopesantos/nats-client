@@ -130,10 +130,8 @@ func (p *PublishMessage) FormattedMessage() []byte {
 }
 
 type SubscribeMessage struct {
-	opName     Operation
-	subject    string
-	queueGroup string
-	sid        int
+	opName Operation
+	Subscription
 }
 
 func (s *SubscribeMessage) OperationName() Operation {
@@ -145,13 +143,13 @@ func (s *SubscribeMessage) MessagePayload() []byte {
 }
 
 func (s *SubscribeMessage) OperationMessage() []byte {
-	return []byte(fmt.Sprintf("%s %s %s %d\r\n", s.opName, s.subject, s.queueGroup, s.sid))
+	return []byte(fmt.Sprintf("%s %s %s %d\r\n", s.opName, s.Subject, s.QueueGroup, s.Sid))
 }
 
 type Subscription struct {
-	subject    string
-	queueGroup string
-	sid        int // NOTE: Is the sid needed here?
+	Subject    string
+	QueueGroup string
+	Sid        int // NOTE: Is the sid needed here?
 }
 
 // FIXME: Overlaps with PublishMessage ???
