@@ -133,7 +133,12 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 			}
 		case *ContentMessage:
 			contentMsg := message.(*ContentMessage)
-			sub := c.subscriptions[contentMsg.sid]
+			// Check if subscription exists
+			sub, ok := c.subscriptions[contentMsg.sid]
+			if !ok {
+				continue
+			}
+
 			contentMsg.Sub = sub
 
 			c.subscriptionMessages[contentMsg.sid] <- contentMsg
