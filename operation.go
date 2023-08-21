@@ -147,9 +147,12 @@ func (s *SubscribeMessage) OperationMessage() []byte {
 }
 
 type Subscription struct {
+	Sid        int
 	Subject    string
 	QueueGroup string
-	Sid        int // NOTE: Is the sid needed here?
+
+	messagesChan chan *ContentMessage
+	callbackFn   CallbackFunction
 }
 
 // FIXME: Overlaps with PublishMessage ???

@@ -28,12 +28,9 @@ type Client struct {
 
 	conn net.Conn
 
-	messages chan OperationMessage
-	acks     chan struct{}
-
-	subscriptions                 map[int]*Subscription // *?
-	subscriptionMessages          map[int]chan *ContentMessage
-	subscriptionCallbackFunctions map[int]CallbackFunction
+	messagesChan  chan OperationMessage
+	acks          chan struct{}
+	subscriptions map[int]*Subscription
 
 	connectionEstablished bool
 
@@ -53,12 +50,10 @@ func (c *Client) Connect(url string) error {
 	c.conn = conn
 
 	// Initialize the messagesReceived channel
-	c.messages = make(chan OperationMessage, 256) // NOTE: Buffer size?
-	c.acks = make(chan struct{})                  // FIXME: Not buffered?
+	c.messagesChan = make(chan OperationMessage, 256) // NOTE: Buffer size?
+	c.acks = make(chan struct{})                      // FIXME: Not buffered?
 
 	c.subscriptions = make(map[int]*Subscription)
-	c.subscriptionMessages = make(map[int]chan *ContentMessage)
-	c.subscriptionCallbackFunctions = make(map[int]CallbackFunction)
 
 	// FIXME: Is this really needed?
 	startReadSync := make(chan struct{})
@@ -141,9 +136,11 @@ func (c *Client) ingestMessages(ctx context.Context, syncChannel chan<- struct{}
 
 			contentMsg.Sub = sub
 
-			c.subscriptionMessages[contentMsg.sid] <- contentMsg
+			// FIXME: Check if messagesChan hasn't been closed?
+			// full?
+			sub.messagesChan <- contentMsg
 		default:
-			c.messages <- message
+			c.messagesChan <- message
 		}
 	}
 }
@@ -163,7 +160,7 @@ func (c *Client) ackReceived() bool {
 
 func (c *Client) readMessage() (OperationMessage, error) {
 	select {
-	case msg := <-c.messages:
+	case msg := <-c.messagesChan:
 		return msg, nil
 	case <-time.After(c.readMessageTimeout):
 		return nil, fmt.Errorf("read timeout exceeded (%s)", c.readMessageTimeout)
@@ -207,8 +204,10 @@ func (c *Client) ChanSubscribe(subject string, ch chan *ContentMessage) (*Subscr
 		return nil, err
 	}
 
+	// Override
+	sub.messagesChan = ch
+	// FIXME: Add subscription (addSub) method?
 	c.subscriptions[sub.Sid] = sub
-	c.subscriptionMessages[sub.Sid] = ch
 
 	return sub, nil
 }
@@ -219,21 +218,19 @@ func (c *Client) Subscribe(subject string, callbackFunc func(msg *ContentMessage
 		return err
 	}
 
+	sub.callbackFn = callbackFunc
 	c.subscriptions[sub.Sid] = sub
-	// FIXME: Make channel buffer size configurable
-	c.subscriptionMessages[sub.Sid] = make(chan *ContentMessage, 32)
-	c.subscriptionCallbackFunctions[sub.Sid] = callbackFunc
 
 	// FIXME
-	go func(sid int) {
+	go func(sub *Subscription) {
 		for {
-			if msg, ok := <-c.subscriptionMessages[sid]; ok {
-				c.subscriptionCallbackFunctions[sid](msg)
+			if msg, ok := <-sub.messagesChan; ok {
+				sub.callbackFn(msg)
 			} else {
 				break
 			}
 		}
-	}(sub.Sid)
+	}(sub)
 
 	return nil
 }
@@ -245,6 +242,9 @@ func (c *Client) subscribe(subject string) (*Subscription, error) {
 		Subscription: Subscription{
 			Subject: subject,
 			Sid:     sid,
+
+			// FIXME: Make channel buffer size configurable
+			messagesChan: make(chan *ContentMessage, 32),
 		},
 	}
 
@@ -261,12 +261,10 @@ func (c *Client) subscribe(subject string) (*Subscription, error) {
 }
 
 func (c *Client) Unsubscribe(sub *Subscription) {
-	close(c.subscriptionMessages[sub.Sid])
+	close(sub.messagesChan)
 
 	// FIXME: These operations should be mutually exclusive
 	delete(c.subscriptions, sub.Sid)
-	delete(c.subscriptionMessages, sub.Sid)
-	delete(c.subscriptionCallbackFunctions, sub.Sid)
 }
 
 // FIXME: Reads data byte-by-byte and checks for the delimiter after each byte read,
