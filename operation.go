@@ -152,13 +152,13 @@ type Subscription struct {
 	Subject    string
 	QueueGroup string
 
-	messagesChan chan *ContentMessage
-	callbackFn   CallbackFunction
+	msgsCh chan *ContentMessage
+	cbFn   CallbackFunction
 }
 
 func (s *Subscription) NextMessage(readTimeout time.Duration) (*ContentMessage, error) {
 	select {
-	case msg := <-s.messagesChan:
+	case msg := <-s.msgsCh:
 		return msg, nil
 	case <-time.After(readTimeout):
 		return nil, fmt.Errorf("read timeout exceeded (%s)", readTimeout)
