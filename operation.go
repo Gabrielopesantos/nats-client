@@ -2,6 +2,7 @@ package nats
 
 import (
 	"fmt"
+	"time"
 )
 
 type Operation string
@@ -153,6 +154,15 @@ type Subscription struct {
 
 	messagesChan chan *ContentMessage
 	callbackFn   CallbackFunction
+}
+
+func (s *Subscription) NextMessage(readTimeout time.Duration) (*ContentMessage, error) {
+	select {
+	case msg := <-s.messagesChan:
+		return msg, nil
+	case <-time.After(readTimeout):
+		return nil, fmt.Errorf("read timeout exceeded (%s)", readTimeout)
+	}
 }
 
 // FIXME: Overlaps with PublishMessage ???

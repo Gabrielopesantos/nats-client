@@ -11,6 +11,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"context"
@@ -36,6 +37,8 @@ type Client struct {
 
 	readMessageTimeout time.Duration
 	ackValidateTimeout time.Duration
+
+	sync.Mutex
 }
 
 func (c *Client) Connect(url string) error {
@@ -206,8 +209,7 @@ func (c *Client) ChanSubscribe(subject string, ch chan *ContentMessage) (*Subscr
 
 	// Override
 	sub.messagesChan = ch
-	// FIXME: Add subscription (addSub) method?
-	c.subscriptions[sub.Sid] = sub
+	c.registerSubscription(sub)
 
 	return sub, nil
 }
@@ -219,7 +221,7 @@ func (c *Client) Subscribe(subject string, callbackFunc func(msg *ContentMessage
 	}
 
 	sub.callbackFn = callbackFunc
-	c.subscriptions[sub.Sid] = sub
+	c.registerSubscription(sub)
 
 	// FIXME
 	go func(sub *Subscription) {
@@ -233,6 +235,17 @@ func (c *Client) Subscribe(subject string, callbackFunc func(msg *ContentMessage
 	}(sub)
 
 	return nil
+}
+
+func (c *Client) SubscribeSync(subject string) (*Subscription, error) {
+	sub, err := c.subscribe(subject)
+	if err != nil {
+		return nil, err
+	}
+
+	c.registerSubscription(sub)
+
+	return sub, nil
 }
 
 func (c *Client) subscribe(subject string) (*Subscription, error) {
@@ -261,9 +274,21 @@ func (c *Client) subscribe(subject string) (*Subscription, error) {
 }
 
 func (c *Client) Unsubscribe(sub *Subscription) {
-	close(sub.messagesChan)
+	c.removeSubscription(sub)
+}
 
-	// FIXME: These operations should be mutually exclusive
+func (c *Client) registerSubscription(sub *Subscription) {
+	c.Lock()
+	defer c.Unlock()
+
+	c.subscriptions[sub.Sid] = sub
+}
+
+func (c *Client) removeSubscription(sub *Subscription) {
+	c.Lock()
+	defer c.Unlock()
+
+	close(sub.messagesChan)
 	delete(c.subscriptions, sub.Sid)
 }
 
